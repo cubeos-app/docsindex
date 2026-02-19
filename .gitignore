@@ -1,0 +1,19 @@
+# Compiled binaries
+cubeos-docsindex
+*.exe
+
+# Go
+vendor/
+*.test
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Session artifacts
+*HANDOVER*.md

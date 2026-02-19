@@ -1,0 +1,88 @@
+# =============================================================================
+# CubeOS Docsindex Pipeline — Build multi-arch image, push to GHCR, deploy
+# =============================================================================
+
+stages:
+  - package
+  - deploy
+
+variables:
+  DOCSINDEX_IMAGE: "ghcr.io/cubeos-app/cubeos-docsindex"
+
+# -----------------------------------------------------------------------------
+# PACKAGE — Build multi-arch Docker image and push to GHCR
+# -----------------------------------------------------------------------------
+package:
+  stage: package
+  tags: [multiarch]
+  image: docker:24
+  before_script:
+    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+    - docker buildx create --name docsindexbuilder --driver docker-container --use
+    - docker buildx inspect --bootstrap
+  script:
+    - |
+      echo "Building multi-arch docsindex image..."
+      docker buildx build --no-cache \
+        --platform linux/amd64,linux/arm64 \
+        --push \
+        -t ${DOCSINDEX_IMAGE}:${CI_COMMIT_SHORT_SHA} \
+        -t ${DOCSINDEX_IMAGE}:latest \
+        .
+      echo "Pushed multi-arch ${DOCSINDEX_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+  after_script:
+    - docker buildx rm docsindexbuilder || true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# -----------------------------------------------------------------------------
+# DEPLOY — Redeploy Swarm stack on Pi
+# -----------------------------------------------------------------------------
+deploy:
+  stage: deploy
+  tags:
+    - deploy
+    - arm64
+  needs:
+    - package
+  before_script:
+    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+  script:
+    - |
+      COMPOSE_FILE="/cubeos/coreapps/cubeos-docsindex/appconfig/docker-compose.yml"
+      if [ ! -f "$COMPOSE_FILE" ]; then
+        echo "ERROR: docsindex compose file not found"
+        exit 1
+      fi
+
+      echo "Removing existing stack..."
+      docker stack rm cubeos-docsindex 2>/dev/null || true
+      sleep 5
+
+      echo "Deploying stack..."
+      docker stack deploy \
+        -c "$COMPOSE_FILE" \
+        --resolve-image=never \
+        cubeos-docsindex
+
+      sleep 5
+      REPLICAS=$(docker stack services cubeos-docsindex --format "{{.Replicas}}" 2>/dev/null | head -1 || echo "0/0")
+      echo "Replicas: $REPLICAS"
+
+      for i in $(seq 1 12); do
+        REPLICAS=$(docker stack services cubeos-docsindex --format "{{.Replicas}}" 2>/dev/null | head -1 || echo "0/0")
+        RUNNING=$(echo "$REPLICAS" | cut -d'/' -f1)
+        DESIRED=$(echo "$REPLICAS" | cut -d'/' -f2)
+        if [ "$RUNNING" = "$DESIRED" ] && [ "$RUNNING" != "0" ]; then
+          echo "docsindex running ($REPLICAS)"
+          break
+        fi
+        [ "$i" -eq 12 ] && echo "docsindex may still be starting ($REPLICAS)"
+        sleep 5
+      done
+
+      echo "Deploy complete"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  environment:
+    name: production

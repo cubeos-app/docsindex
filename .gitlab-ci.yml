@@ -36,52 +36,28 @@ package:
     - if: $CI_COMMIT_BRANCH == "main"
 
 # -----------------------------------------------------------------------------
-# DEPLOY — Redeploy Swarm stack on Pi
+# DEPLOY — Redeploy Swarm stack on Pi (via SSH)
 # -----------------------------------------------------------------------------
 deploy:
   stage: deploy
-  tags:
-    - deploy
-    - arm64
+  tags: [multiarch]
+  image: alpine:latest
   needs:
     - package
   before_script:
-    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$CI_DEPLOY_SSH_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -H ${PI_DEPLOY_ADDR} >> ~/.ssh/known_hosts 2>/dev/null
   script:
+    - scp scripts/ci-deploy.sh ${PI_DEPLOY_HOST}:/tmp/ci-deploy-docsindex.sh
     - |
-      COMPOSE_FILE="/cubeos/coreapps/cubeos-docsindex/appconfig/docker-compose.yml"
-      if [ ! -f "$COMPOSE_FILE" ]; then
-        echo "ERROR: docsindex compose file not found"
-        exit 1
-      fi
-
-      echo "Removing existing stack..."
-      docker stack rm cubeos-docsindex 2>/dev/null || true
-      sleep 5
-
-      echo "Deploying stack..."
-      docker stack deploy \
-        -c "$COMPOSE_FILE" \
-        --resolve-image=never \
-        cubeos-docsindex
-
-      sleep 5
-      REPLICAS=$(docker stack services cubeos-docsindex --format "{{.Replicas}}" 2>/dev/null | head -1 || echo "0/0")
-      echo "Replicas: $REPLICAS"
-
-      for i in $(seq 1 12); do
-        REPLICAS=$(docker stack services cubeos-docsindex --format "{{.Replicas}}" 2>/dev/null | head -1 || echo "0/0")
-        RUNNING=$(echo "$REPLICAS" | cut -d'/' -f1)
-        DESIRED=$(echo "$REPLICAS" | cut -d'/' -f2)
-        if [ "$RUNNING" = "$DESIRED" ] && [ "$RUNNING" != "0" ]; then
-          echo "docsindex running ($REPLICAS)"
-          break
-        fi
-        [ "$i" -eq 12 ] && echo "docsindex may still be starting ($REPLICAS)"
-        sleep 5
-      done
-
-      echo "Deploy complete"
+      ssh -o ServerAliveInterval=15 ${PI_DEPLOY_HOST} \
+        "GHCR_TOKEN='${GHCR_TOKEN}' GHCR_USER='${GHCR_USER}' bash /tmp/ci-deploy-docsindex.sh"
+    - ssh ${PI_DEPLOY_HOST} "rm -f /tmp/ci-deploy-docsindex.sh"
+  after_script:
+    - kill $SSH_AGENT_PID 2>/dev/null || true
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
   environment:

@@ -211,7 +211,7 @@ type Server struct {
 func main() {
 	config := loadConfig()
 
-	log.Printf("CubeOS Document Indexer v0.2.0-alpha.01 starting...")
+	log.Printf("CubeOS Document Indexer v0.2.0-beta.01 starting...")
 	log.Printf("  Listen:     %s", config.ListenAddr)
 	log.Printf("  Docs repo:  %s", config.DocsRepoURL)
 	log.Printf("  Local path: %s", config.DocsLocalPath)

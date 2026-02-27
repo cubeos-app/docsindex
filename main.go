@@ -835,11 +835,26 @@ func syncDocs(config *Config) error {
 			exec.Command("git", "-C", config.DocsLocalPath, "reset", "--hard", "origin/main").Run()
 		}
 	} else if config.DocsRepoURL != "" {
-		// Clone to temp dir first — NEVER destroy existing docs (B45)
-		// /cubeos/docs/ may contain packer-seeded content that must survive
-		// a failed clone (e.g. offline mode, repo unreachable).
+		// First try: clone directly into the target directory if it's empty.
+		// This handles bind-mounted directories (e.g. Docker/LXC) where
+		// os.Rename fails with "device or resource busy".
+		if isDirEmpty(config.DocsLocalPath) {
+			log.Printf("  Cloning %s into docs dir...", config.DocsRepoURL)
+			cmd := exec.Command("git", "clone", "--depth=1", config.DocsRepoURL, ".")
+			cmd.Dir = config.DocsLocalPath
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("git clone failed: %w", err)
+			}
+			log.Println("  Git clone succeeded")
+			return nil
+		}
+
+		// Fallback: clone to temp dir and swap — preserves existing content
+		// on failure (e.g. packer-seeded docs in offline mode).
 		tmpDir := config.DocsLocalPath + ".clone-tmp"
-		os.RemoveAll(tmpDir) // clean stale temp only
+		os.RemoveAll(tmpDir)
 		log.Printf("  Cloning %s to temp dir...", config.DocsRepoURL)
 		if err := os.MkdirAll(filepath.Dir(config.DocsLocalPath), 0755); err != nil {
 			return fmt.Errorf("failed to create parent dir: %w", err)
@@ -851,15 +866,21 @@ func syncDocs(config *Config) error {
 			os.RemoveAll(tmpDir)
 			return fmt.Errorf("git clone failed: %w", err)
 		}
-		// Clone succeeded — atomically swap directories
+		// Try atomic swap first (works on bare metal / Pi)
 		backupDir := config.DocsLocalPath + ".bak"
 		os.RemoveAll(backupDir)
 		if err := os.Rename(config.DocsLocalPath, backupDir); err != nil {
-			// Target may not exist (first run), that's OK
-			log.Printf("  Note: could not backup existing docs: %v", err)
+			// Rename failed (bind mount) — copy contents instead
+			log.Printf("  Rename failed (%v), copying into docs dir...", err)
+			if err := copyDirContents(tmpDir, config.DocsLocalPath); err != nil {
+				os.RemoveAll(tmpDir)
+				return fmt.Errorf("failed to copy docs: %w", err)
+			}
+			os.RemoveAll(tmpDir)
+			log.Println("  Git clone succeeded, docs copied in")
+			return nil
 		}
 		if err := os.Rename(tmpDir, config.DocsLocalPath); err != nil {
-			// Restore backup if swap fails
 			os.Rename(backupDir, config.DocsLocalPath)
 			os.RemoveAll(tmpDir)
 			return fmt.Errorf("failed to swap docs directory: %w", err)
@@ -868,6 +889,41 @@ func syncDocs(config *Config) error {
 		log.Println("  Git clone succeeded, docs swapped in")
 	}
 	return nil
+}
+
+// isDirEmpty returns true if the directory exists and contains no entries.
+func isDirEmpty(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false
+	}
+	return len(entries) == 0
+}
+
+// copyDirContents copies all files and subdirectories from src into dst.
+// dst must already exist. Existing files in dst are overwritten.
+func copyDirContents(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if relPath == "." {
+			return nil
+		}
+		target := filepath.Join(dst, relPath)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
 }
 
 func findMarkdownFiles(root string) ([]string, error) {

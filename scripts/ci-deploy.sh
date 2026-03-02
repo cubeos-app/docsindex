@@ -8,6 +8,18 @@ set -euo pipefail
 
 COMPOSE_FILE="/cubeos/coreapps/cubeos-docsindex/appconfig/docker-compose.yml"
 
+# --- Source env files for compose variable substitution ---
+if [ -f /cubeos/config/defaults.env ]; then
+  set -a
+  source /cubeos/config/defaults.env
+  set +a
+fi
+if [ -f /cubeos/config/secrets.env ]; then
+  set -a
+  source /cubeos/config/secrets.env
+  set +a
+fi
+
 echo "=== Docsindex Deploy ==="
 
 # --- Pre-flight ---
